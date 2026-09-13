@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -71,13 +72,12 @@ func newApp() http.Handler {
 	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm() // a body that is not a form is a failed login, not a 500
 		user, pass := r.PostForm.Get("user"), r.PostForm.Get("pass")
-		ok := user == "demo@example.com" && pass == "demo"
-		outcome, status, title := "login_failed", 401, "Nope"
-		if ok {
-			outcome, status, title = "login_succeeded", 200, "Welcome"
+		outcome, status, title, result := "login_failed", 401, "Nope", "failed"
+		if user == "demo@example.com" && pass == "demo" {
+			outcome, status, title, result = "login_succeeded", 200, "Welcome", "succeeded"
 		}
 		camada.Track(r, outcome, user) // uid is HMAC-hashed in the SDK
-		page(w, r, status, title, fmt.Sprintf("<p>login %s</p>", map[bool]string{true: "succeeded", false: "failed"}[ok]))
+		page(w, r, status, title, fmt.Sprintf("<p>login %s</p>", result))
 	})
 	mux.HandleFunc("GET /api/data", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -99,24 +99,42 @@ func newApp() http.Handler {
 	return camada.Handler(mux) // ← the two-line install; the engine builds itself on the first request
 }
 
-func main() {
-	loadDotEnv(".env")
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3003"
-	}
-	srv := &http.Server{Addr: ":" + port, Handler: newApp(), ReadHeaderTimeout: 10 * time.Second}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+// serve runs srv on ln until ctx is done, then stops accepting, waits for in-flight requests
+// and drains camada's last event batch before returning. ListenAndServe returns the moment
+// Shutdown closes the listener, so main must wait here rather than exit on that return: the
+// drain would otherwise be cut off mid-flight and the last ~15 s of events dropped.
+func serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 		camada.Default().Stop(shutdown) // drains the last event batch, at most 500 ms
 	}()
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return err // the listener failed on its own: nothing is being shut down
+	}
+	<-done
+	return nil
+}
+
+func main() {
+	loadDotEnv(".env")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3003"
+	}
+	srv := &http.Server{Handler: newApp(), ReadHeaderTimeout: 10 * time.Second}
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	log.Printf("camada-go-example listening on :%s", port)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := serve(ctx, srv, ln); err != nil {
 		log.Fatal(err)
 	}
 }
