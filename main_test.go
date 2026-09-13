@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -14,7 +15,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/camada/camada-go"
 )
@@ -35,9 +38,9 @@ func closedPort(t *testing.T) string {
 	return l.Addr().String()
 }
 
-// client is the app over an engine built for this test alone (the lazy first-request build in
+// server is the app over an engine built for this test alone (the lazy first-request build in
 // production; here Configure so the previous test's stopped engine is never reused).
-func client(t *testing.T) *httptest.Server {
+func server(t *testing.T) *httptest.Server {
 	t.Helper()
 	dead := "http://" + closedPort(t)
 	engine := camada.Configure(camada.Options{Env: map[string]string{
@@ -76,7 +79,7 @@ func do(t *testing.T, srv *httptest.Server, method, path string, headers map[str
 }
 
 func TestPagesRenderWithTheFirstPartyBeacon(t *testing.T) {
-	srv := client(t)
+	srv := server(t)
 	first := do(t, srv, "GET", "/", nil, "")
 	if first.status != 200 || !strings.HasPrefix(first.headers.Get("set-cookie"), "_sfp=") {
 		t.Fatalf("%+v", first)
@@ -94,14 +97,14 @@ func TestPagesRenderWithTheFirstPartyBeacon(t *testing.T) {
 }
 
 func TestAPIAnswersJSON(t *testing.T) {
-	r := do(t, client(t), "GET", "/api/data", nil, "")
+	r := do(t, server(t), "GET", "/api/data", nil, "")
 	if r.status != 200 || !strings.Contains(r.body, `"ok":true`) {
 		t.Fatalf("%+v", r)
 	}
 }
 
 func TestLoginReportsTheOutcome(t *testing.T) {
-	srv := client(t)
+	srv := server(t)
 	bad := do(t, srv, "POST", "/login", nil, "user=demo%40example.com&pass=nope")
 	if bad.status != 401 || !strings.Contains(bad.body, "login failed") {
 		t.Fatalf("%+v", bad)
@@ -117,7 +120,7 @@ func TestLoginReportsTheOutcome(t *testing.T) {
 }
 
 func TestEachTestBuildsItsOwnEngine(t *testing.T) {
-	srv := client(t)
+	srv := server(t)
 	do(t, srv, "GET", "/", nil, "")
 	engine := camada.Default()
 	if engine.Env == nil || !strings.HasSuffix(engine.Env.SnapshotURL, "/snapshot") || !strings.HasPrefix(engine.Env.SnapshotURL, "http://127.0.0.1:") {
@@ -126,28 +129,28 @@ func TestEachTestBuildsItsOwnEngine(t *testing.T) {
 }
 
 func TestAColdSnapshotFallsOpen(t *testing.T) {
-	r := do(t, client(t), "GET", "/", map[string]string{"x-forwarded-for": blockedIP}, "")
+	r := do(t, server(t), "GET", "/", map[string]string{"x-forwarded-for": blockedIP}, "")
 	if r.status != 200 || r.headers.Get("x-block-reason") != "" || r.headers.Get("x-rid") == "" {
 		t.Fatalf("%+v", r)
 	}
 }
 
 func TestChallengeMeServesThePageToABrowser(t *testing.T) {
-	r := do(t, client(t), "GET", "/challenge-me", browser, "")
+	r := do(t, server(t), "GET", "/challenge-me", browser, "")
 	if r.status != 403 || r.headers.Get("x-camada-challenge") != "1" || !strings.HasPrefix(r.headers.Get("content-type"), "text/html") || !strings.Contains(r.body, "/__camada/challenge") {
 		t.Fatalf("%+v", r)
 	}
 }
 
 func TestChallengeMeAnswersJSONToAnAPIClient(t *testing.T) {
-	r := do(t, client(t), "GET", "/challenge-me", map[string]string{"x-forwarded-for": "198.51.100.7"}, "")
+	r := do(t, server(t), "GET", "/challenge-me", map[string]string{"x-forwarded-for": "198.51.100.7"}, "")
 	if r.status != 403 || r.body != `{"error":"challenge_required"}` {
 		t.Fatalf("%+v", r)
 	}
 }
 
 func TestUnknownPathRendersThe404Page(t *testing.T) {
-	r := do(t, client(t), "GET", "/nope", nil, "")
+	r := do(t, server(t), "GET", "/nope", nil, "")
 	if r.status != 404 || !strings.Contains(r.body, "Nothing here") || r.headers.Get("x-rid") == "" {
 		t.Fatalf("%+v", r)
 	}
@@ -164,4 +167,65 @@ func TestTheReplaceDirectiveResolvesToTheSiblingSDK(t *testing.T) {
 	if m == nil || string(m[1]) != camada.Version {
 		t.Fatalf("camada.Version %q is not the sibling's %q", camada.Version, m)
 	}
+}
+
+// The shutdown path: once ctx is done, serve closes the listener, waits for in-flight requests,
+// and only returns after camada drained its queue — an outcome tracked just before SIGTERM
+// still reaches ingest. (A fake ingest here; the snapshot URL stays a closed port.)
+func TestServeDrainsTheLastEventBatchBeforeReturning(t *testing.T) {
+	var mu sync.Mutex
+	var rows []map[string]any
+	ingest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/e" {
+			var batch []map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&batch)
+			mu.Lock()
+			rows = append(rows, batch...)
+			mu.Unlock()
+			w.WriteHeader(202)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer ingest.Close()
+	engine := camada.Configure(camada.Options{Env: map[string]string{
+		"CAMADA_KEY": "tok-example.snap-example", "CAMADA_INGEST_URL": ingest.URL, "CAMADA_SNAPSHOT_URL": "http://" + closedPort(t) + "/snapshot",
+	}})
+	t.Cleanup(func() { engine.Stop(context.Background()) })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, &http.Server{Handler: newApp()}, ln) }()
+
+	srv := &httptest.Server{URL: "http://" + ln.Addr().String()}
+	if r := do(t, srv, "POST", "/login", nil, "user=demo%40example.com&pass=nope"); r.status != 401 {
+		t.Fatalf("%+v", r)
+	}
+	mu.Lock()
+	early := len(rows)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("the queue flushed before shutdown (%d rows): the test proves nothing", early)
+	}
+	cancel()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after ctx was cancelled")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, row := range rows {
+		if row["et"] == "login_failed" {
+			return
+		}
+	}
+	t.Fatalf("login_failed never reached ingest; rows %v", rows)
 }

@@ -88,5 +88,7 @@ private window — to see the check again.
 ## Tests
 
 `gofmt -l . | (! grep .) && go vet ./... && go test ./...` — the routes against an engine whose
-analyst URL is a closed port (cold, fail open; the challenge needs no snapshot), plus a guard
-that the `replace` directive resolves to the sibling SDK's current `version.go`.
+analyst URL is a closed port (cold, fail open; the challenge needs no snapshot), a guard
+that the `replace` directive resolves to the sibling SDK's current `version.go`, and the
+shutdown path: `serve` returns only after camada drained its queue, so an outcome tracked just
+before SIGTERM still reaches ingest.
