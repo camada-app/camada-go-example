@@ -8,7 +8,7 @@ This is the hand-test bench for the Go SDK, the twin of [`camada-python-example`
 1. Terminal A — `cd ../camada/edge-analyst && npm run dev` (analyst on :8787), then
    `npm run seed` in a second terminal. Note the printed `CAMADA_KEY`.
 2. Here: `cp .env.example .env` (paste the key if it differs), then `go run .` →
-   http://localhost:3003 (`PORT` overrides). `go.mod` replaces `github.com/camada/camada-go`
+   http://localhost:3003 (`PORT` overrides). `go.mod` replaces `github.com/camada-app/camada-go`
    with the sibling checkout `../camada-go`, the way the npm examples use `file:` deps.
 
 Nothing needs disabling for proxies: `net/http` hands the SDK the socket peer (`r.RemoteAddr`)
@@ -49,7 +49,7 @@ and asserts both answers.
 If request 1 must be enforced, build the engine in `main` and wait for the boot poll:
 
 ```go
-import "github.com/camada/camada-go/snapshot"
+import "github.com/camada-app/camada-go/snapshot"
 
 cam := camada.Default()   // builds the engine; the boot poll is already running on its goroutine
 if cam.Snap != nil {      // nil when CAMADA_KEY is unset or CAMADA_DISABLED=1
