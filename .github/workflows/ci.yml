@@ -7,12 +7,15 @@ jobs:
       matrix:
         go: ["1.23.x", "1.24.x", "stable"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: camada-go-example }
       # camada-go is a replace directive on the sibling checkout; the SDK embeds its own beacon build.
-      - uses: actions/checkout@v4
-        with: { repository: ${{ github.repository_owner }}/camada-go, path: camada-go }
-      - uses: actions/setup-go@v5
-        with: { go-version: ${{ matrix.go }} }
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/camada-go
+          path: camada-go
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
       - run: gofmt -l . | (! grep .) && go vet ./... && go test ./...
         working-directory: camada-go-example

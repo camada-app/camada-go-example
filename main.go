@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/camada/camada-go"
+	"github.com/camada-app/camada-go"
 )
 
 var envLine = regexp.MustCompile(`^([A-Z_]+)=(.*)$`)

@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/camada/camada-go"
+	"github.com/camada-app/camada-go"
 )
 
 const blockedIP = "203.0.113.66"
