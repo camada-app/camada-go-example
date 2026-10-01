@@ -1,3 +1,4 @@
 bin/
 *.test
 .env
+/camada-go-example
