@@ -142,9 +142,9 @@ func TestChallengeMeServesThePageToABrowser(t *testing.T) {
 	}
 }
 
-func TestChallengeMeAnswersJSONToAnAPIClient(t *testing.T) {
+func TestChallengeMeSignalsAnAPIClient(t *testing.T) {
 	r := do(t, server(t), "GET", "/challenge-me", map[string]string{"x-forwarded-for": "198.51.100.7"}, "")
-	if r.status != 403 || r.body != `{"error":"challenge_required"}` {
+	if r.status != 200 || r.headers.Get("x-camada-challenge") != "1" || r.headers.Get("cache-control") != "no-store" {
 		t.Fatalf("%+v", r)
 	}
 }
